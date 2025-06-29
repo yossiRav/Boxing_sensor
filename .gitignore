@@ -1,2 +1,9 @@
 api_key.txt
 api_kay.txt
+react_native_app/BoxingSensorApp/node_modules/
+react_native_app/BoxingSensorRealApp/node_modules/
+react_native_app/BoxingSensorApp/.expo/
+react_native_app/BoxingSensorRealApp/.expo/
+react_native_app/BoxingSensorRealApp/android/app/debug.keystore
+react_native_app/BoxingSensorApp/build/
+react_native_app/BoxingSensorRealApp/build/
