@@ -1,0 +1,9 @@
+{
+  "name": "BoxingSensorRealApp",
+  "displayName": "BoxingSensorRealApp",
+  "extra": {
+    "eas": {
+      "projectId": "193b86a4-d4f0-4b57-81f0-2909abc29410"
+    }
+  }
+}
