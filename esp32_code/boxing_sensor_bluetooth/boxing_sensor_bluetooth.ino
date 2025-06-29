@@ -4,7 +4,7 @@
  * 
  * מיקום חיישנים על השק:
  * חיישן 1: עליון (ראש/גוף) - SDA=21, SCL=22, כתובת=0x68
- * חיישן 2: תחתון (כבד) - SDA=25, SCL=26, כתובת=0x68
+ * חיישן 2: תחתון (כבד) - SDA=25, SCL=26, כתובת=0x69
  * 
  * קובץ: boxing_sensor_bluetooth.ino
  * תאריך: יוני 2025
@@ -54,11 +54,14 @@ SensorData sensor2; // תחתון (כבד)
 unsigned long training_start_time = 0;
 int total_punches = 0;
 String session_id = "";
+unsigned long last_calibration_time = 0;
 
-// הגדרות זיהוי מכות
+// הגדרות זיהוי מכות - מותאם ל-8-9 מכות בשנייה
 float PUNCH_THRESHOLD = 0.8;
-const unsigned long COOLDOWN_BETWEEN_PUNCHES = 120;
+const unsigned long COOLDOWN_BETWEEN_PUNCHES = 110; // 110ms = מקסימום 9 מכות בשנייה
 const unsigned long SENSOR_RESET_TIME = 50;
+const unsigned long RECALIBRATION_INTERVAL = 300000; // כיול מחדש כל 5 דקות
+const float MOVEMENT_THRESHOLD = 0.05; // רגישות לתנועה
 
 // למידה אוטומטית
 const int LEARNING_SAMPLE_SIZE = 15;
@@ -139,6 +142,13 @@ void loop() {
     // עדכון סיכום
     total_punches = sensor1.punch_count + sensor2.punch_count;
     
+    // כיול אוטומטי תקופתי (כל 5 דקות)
+    if (millis() - last_calibration_time > RECALIBRATION_INTERVAL) {
+        Serial.println("🔄 כיול תקופתי אוטומטי...");
+        autoRecalibrate();
+        last_calibration_time = millis();
+    }
+    
     // שליחת נתונים לאפליקציה
     sendDataToBluetooth();
     
@@ -152,7 +162,25 @@ void loop() {
         last_status = millis();
     }
     
-    delay(15); // עיכוב כללי - דגימה של כ-60Hz במקום 100Hz
+    delay(10); // דגימה מהירה - 100Hz
+}
+
+// כיול אוטומטי תקופתי
+void autoRecalibrate() {
+    // כיול רק אם אין פעילות (לא היו מכות ב-10 שניות האחרונות)
+    unsigned long current_time = millis();
+    
+    if (current_time - sensor1.last_punch_time > 10000 && 
+        current_time - sensor2.last_punch_time > 10000) {
+        
+        calibrateSensor(&I2C_1, &sensor1, "עליון", MPU6050_ADDR1);
+        delay(100);
+        calibrateSensor(&I2C_2, &sensor2, "תחתון", MPU6050_ADDR2);
+        
+        Serial.println("✅ כיול אוטומטי הושלם");
+    } else {
+        Serial.println("⚠️ דחיית כיול - יש פעילות אחרונה");
+    }
 }
 
 void sendDataToBluetooth() {
@@ -430,14 +458,16 @@ void readSensor(TwoWire* wire, SensorData* sensor, byte addr) {
 }
 
 void updateMovingBaseline(SensorData* sensor, float ax, float ay, float az) {
+    // בדיקה מתקדמת לתנועה חשודה
     float diff_from_baseline = sqrt(
         pow(ax - sensor->moving_avg_x, 2) +
         pow(ay - sensor->moving_avg_y, 2) +
         pow(az - sensor->moving_avg_z, 2)
     );
     
-    if (diff_from_baseline < 0.15) {
-        const float alpha = 0.005;
+    // אם יש תנועה קטנה - עדכן baseline
+    if (diff_from_baseline < MOVEMENT_THRESHOLD) {
+        const float alpha = 0.002; // עדכון איטי יותר ליציבות
         
         sensor->moving_avg_x = sensor->moving_avg_x * (1 - alpha) + ax * alpha;
         sensor->moving_avg_y = sensor->moving_avg_y * (1 - alpha) + ay * alpha;
@@ -445,20 +475,53 @@ void updateMovingBaseline(SensorData* sensor, float ax, float ay, float az) {
         
         sensor->stable_count++;
         
-        if (sensor->stable_count > 500) {
+        // עדכון baseline רק אחרי יציבות ארוכה
+        if (sensor->stable_count > 1000) {
             sensor->baseline_x = sensor->moving_avg_x;
             sensor->baseline_y = sensor->moving_avg_y;
             sensor->baseline_z = sensor->moving_avg_z;
             sensor->stable_count = 0;
         }
     } else {
+        // אם יש תנועה גדולה - אפס ספירת יציבות
         sensor->stable_count = 0;
+        
+        // אם זה תנועה ארוכה (כמו שינוי כיוון) - כייל מחדש
+        static unsigned long movement_start = 0;
+        static float last_diff = 0;
+        
+        if (abs(diff_from_baseline - last_diff) < 0.1) {
+            if (movement_start == 0) {
+                movement_start = millis();
+            } else if (millis() - movement_start > 3000) { // תנועה של 3+ שניות
+                Serial.println("🔄 זוהתה תנועה ארוכה - מכייל מחדש...");
+                quickRecalibrate(sensor, ax, ay, az);
+                movement_start = 0;
+            }
+        } else {
+            movement_start = 0;
+        }
+        
+        last_diff = diff_from_baseline;
     }
+}
+
+// כיול מהיר במקרה של תנועה ארוכה
+void quickRecalibrate(SensorData* sensor, float ax, float ay, float az) {
+    sensor->baseline_x = ax;
+    sensor->baseline_y = ay;
+    sensor->baseline_z = az;
+    sensor->moving_avg_x = ax;
+    sensor->moving_avg_y = ay;
+    sensor->moving_avg_z = az;
+    sensor->stable_count = 0;
+    Serial.println("✅ כיול מהיר הושלם");
 }
 
 void detectPunch(SensorData* sensor) {
     unsigned long current_time = millis();
     
+    // זיהוי מכה רק אם עוצמה מספיק גבוהה
     if (sensor->current_punch > PUNCH_THRESHOLD && 
         !sensor->punch_detected && 
         (current_time - sensor->last_detection > SENSOR_RESET_TIME)) {
@@ -467,7 +530,8 @@ void detectPunch(SensorData* sensor) {
         sensor->last_detection = current_time;
     }
     
-    if (sensor->current_punch < PUNCH_THRESHOLD * 0.3) {
+    // איפוס זיהוי כשהעוצמה יורדת מספיק
+    if (sensor->current_punch < PUNCH_THRESHOLD * 0.2) {
         sensor->punch_detected = false;
     }
 }
@@ -476,13 +540,19 @@ void detectSmartPunch() {
     static unsigned long last_smart_detection = 0;
     unsigned long current_time = millis();
     
+    // בדיקה שחלף מספיק זמן מהמכה הקודמת (מקסימום 9 מכות בשנייה)
+    if (current_time - last_smart_detection < COOLDOWN_BETWEEN_PUNCHES) {
+        return; // יציאה מוקדמת אם חלף זמן קצר מדי
+    }
+    
     bool any_punch = sensor1.punch_detected || sensor2.punch_detected;
     
-    if (any_punch && (current_time - last_smart_detection > COOLDOWN_BETWEEN_PUNCHES)) {
+    if (any_punch) {
         float max_force = 0;
         int winning_sensor = 0;
         String winning_zone = "";
         
+        // בחירת החיישן עם העוצמה הגבוהה ביותר
         if (sensor1.current_punch > max_force && sensor1.current_punch > PUNCH_THRESHOLD) {
             max_force = sensor1.current_punch;
             winning_sensor = 1;
@@ -495,7 +565,8 @@ void detectSmartPunch() {
             winning_zone = "תחתון";
         }
         
-        if (winning_sensor > 0) {
+        // רישום מכה רק אם יש מנצח ברור
+        if (winning_sensor > 0 && max_force > PUNCH_THRESHOLD) {
             if (winning_sensor == 1) {
                 sensor1.punch_count++;
                 sensor1.last_punch_time = current_time;
@@ -506,6 +577,7 @@ void detectSmartPunch() {
             
             float combined_force = calculateCombinedForce(winning_sensor);
             
+            // חישוב BPM
             static unsigned long last_punch_time_for_bpm = 0;
             unsigned long time_between_punches = current_time - last_punch_time_for_bpm;
             float bpm = 0;
@@ -513,6 +585,7 @@ void detectSmartPunch() {
                 bpm = 60000.0 / time_between_punches;
             }
             
+            // למידה אוטומטית
             if (!learning_complete) {
                 adaptToUser(combined_force, time_between_punches);
             }
