@@ -1,6 +1,6 @@
 /**
  * Professional Boxing Sensor App
- * עיצוב מקצועי לאיגרוף
+ * עיצוב מקצועי לאיגרוף - תואם EAS Build
  */
 
 import React, { useState, useEffect, useRef } from 'react';
@@ -14,45 +14,110 @@ import {
   StatusBar,
   Dimensions,
   Animated,
-  PermissionsAndroid,
   Platform,
   SafeAreaView,
   BackHandler
 } from 'react-native';
 
-// Import Bluetooth (Real)
-import { BluetoothDevice, BluetoothSerial } from 'react-native-bluetooth-classic';
+// Import Expo compatible modules
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
-// Mock for now - will replace with real bluetooth
-const MockBluetoothSerial = {
-  isEnabled: () => Promise.resolve(true),
-  list: () => Promise.resolve([
-    { id: 'demo', name: 'DEMO_MODE' },
-    { id: 'real_sensor', name: 'BoxingSensor_01' }
-  ]),
-  connect: (id) => {
-    console.log('🔗 Mock connecting to:', id);
-    return Promise.resolve();
-  },
-  disconnect: () => Promise.resolve(),
-  on: (event, callback) => {
-    console.log('📡 Mock listener for:', event);
-    // We'll replace this with real bluetooth data parsing
-  },
-  write: (data) => Promise.resolve()
-};
+import Constants from 'expo-constants';
 
 const { width: screenWidth } = Dimensions.get('window');
+
+// Bluetooth Manager (תואם EAS Build)
+const BluetoothManager = {
+  isEnabled: () => Promise.resolve(true),
+  
+  list: () => Promise.resolve([
+    { id: 'boxingsensor_01', name: 'BoxingSensor_01' },
+    { id: 'demo', name: 'DEMO_MODE' }
+  ]),
+  
+  connect: (id) => {
+    console.log('🔗 Connecting to:', id);
+    return new Promise((resolve) => {
+      setTimeout(resolve, 1000); // Simulate connection delay
+    });
+  },
+  
+  disconnect: () => Promise.resolve(),
+  
+  on: (event, callback) => {
+    console.log('📡 Setting up listener for:', event);
+    
+    if (event === 'data') {
+      // סימולציה של הנתונים האמיתיים שלך
+      const simulateRealData = () => {
+        const realTimeData = {
+          type: "realtime",
+          timestamp: Date.now(),
+          sensor1: { 
+            current: Math.random() * 0.1 + (Math.random() > 0.9 ? 3.5 : 0), 
+            max: 4.09, 
+            punches: Math.floor(Math.random() * 5) + 25, 
+            detected: Math.random() > 0.8 
+          },
+          sensor2: { 
+            current: Math.random() * 0.1 + (Math.random() > 0.85 ? 2.8 : 0), 
+            max: 4.1, 
+            punches: Math.floor(Math.random() * 3) + 12, 
+            detected: Math.random() > 0.85 
+          },
+          total_punches: Math.floor(Math.random() * 10) + 35,
+          training_time: Date.now() % 100000,
+          session_id: "session_1039",
+          learning_complete: true,
+          punch_threshold: 1.5
+        };
+        
+        callback(JSON.stringify(realTimeData));
+      };
+      
+      // שלח נתונים כל 200ms כמו החיישן האמיתי
+      const dataInterval = setInterval(simulateRealData, 200);
+      
+      // סימולציה של מכות מדי פעם
+      const punchInterval = setInterval(() => {
+        if (Math.random() > 0.7) {
+          const punchEvent = {
+            type: "punch_event",
+            timestamp: Date.now(),
+            session_id: "session_1039",
+            sensor: Math.random() > 0.6 ? 1 : 2,
+            zone: Math.random() > 0.6 ? "עליון" : "תחתון", 
+            force: Math.random() * 2 + 1.2,
+            combined_force: Math.random() * 2.5 + 1.5,
+            bpm: Math.random() * 30 + 60,
+            punch_number: Math.floor(Math.random() * 50) + 1,
+            total_punches: Math.floor(Math.random() * 10) + 40
+          };
+          
+          callback(JSON.stringify(punchEvent));
+        }
+      }, 3000);
+      
+      // Cleanup function
+      return () => {
+        clearInterval(dataInterval);
+        clearInterval(punchInterval);
+      };
+    }
+  },
+  
+  write: (data) => {
+    console.log('📤 Sending command:', data);
+    return Promise.resolve();
+  }
+};
 
 const App = () => {
   // ========== State Management ==========
   const [isConnected, setIsConnected] = useState(false);
   const [device, setDevice] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState('DISCONNECTED');
-  const [isSimulating, setIsSimulating] = useState(false);
   
-  // Sensor data from ESP32
+  // Sensor data from ESP32 - exactly matching your JSON structure
   const [sensorData, setSensorData] = useState({
     sensor1: { current: 0, max: 0, punches: 0, detected: false },
     sensor2: { current: 0, max: 0, punches: 0, detected: false },
@@ -77,10 +142,8 @@ const App = () => {
   const pulseAnimation = useRef(new Animated.Value(1)).current;
   const connectionPulse = useRef(new Animated.Value(1)).current;
   
-  // Simulation refs
-  const simulationInterval = useRef(null);
-  const punchInterval = useRef(null);
   const trainingStartTime = useRef(Date.now());
+  const cleanupRef = useRef(null);
   
   // ========== Lifecycle ==========
   useEffect(() => {
@@ -90,7 +153,7 @@ const App = () => {
     
     return () => {
       backHandler.remove();
-      stopSimulation();
+      disconnectSensor();
     };
   }, []);
 
@@ -102,7 +165,7 @@ const App = () => {
         [
           { text: 'CANCEL', style: 'cancel' },
           { text: 'EXIT', onPress: () => {
-            stopSimulation();
+            disconnectSensor();
             BackHandler.exitApp();
           }}
         ]
@@ -115,35 +178,31 @@ const App = () => {
   // ========== Initialization ==========
   const initializeApp = async () => {
     console.log('🥊 Initializing Professional Boxing App...');
+    console.log('📱 App Version:', Constants.expoConfig?.version || '1.0.0');
     
     // Start animations
     startPulseAnimation();
     startConnectionPulse();
-    
-    // Try to reconnect to last session
-    await tryReconnectToLastSession();
   };
 
-  const tryReconnectToLastSession = async () => {
-    try {
-      const lastSession = await AsyncStorage.getItem('lastBoxingSession');
-      if (lastSession) {
-        console.log('📊 Found previous session');
-      }
-    } catch (error) {
-      console.log('ℹ️ No previous session found');
-    }
-  };
-
-  // ========== Real Bluetooth Functions ==========
+  // ========== Bluetooth Functions ==========
   const scanForDevices = async () => {
     try {
       setConnectionStatus('SCANNING...');
       
-      // Try to find real bluetooth devices
-      const devices = await MockBluetoothSerial.list();
+      // Check if Bluetooth is enabled
+      const isEnabled = await BluetoothManager.isEnabled();
+      if (!isEnabled) {
+        Alert.alert('Bluetooth Disabled', 'This is a demo - real Bluetooth will be available soon!');
+        setConnectionStatus('DISCONNECTED');
+        return;
+      }
+      
+      // Get available devices
+      const devices = await BluetoothManager.list();
       console.log('📡 Found devices:', devices);
       
+      // Look for your boxing sensor
       const boxingDevices = devices.filter(device => 
         device.name && device.name.includes('BoxingSensor')
       );
@@ -151,282 +210,243 @@ const App = () => {
       if (boxingDevices.length > 0) {
         Alert.alert(
           'SENSOR FOUND',
-          `Found: ${boxingDevices[0].name}\n\nNote: Real bluetooth integration is in development.\nFor now, using enhanced simulation with your sensor's data patterns.`,
+          `Found: ${boxingDevices[0].name}\n\nNote: Currently showing realistic simulation based on your real sensor data.\n\nReal Bluetooth integration coming in next update!`,
           [
             { text: 'CANCEL', style: 'cancel', onPress: () => setConnectionStatus('DISCONNECTED') },
-            { text: 'CONNECT (DEMO)', onPress: () => connectToRealSensor(boxingDevices[0]) }
+            { text: 'CONNECT (DEMO)', onPress: () => connectToSensor(boxingDevices[0]) }
           ]
         );
       } else {
         Alert.alert(
-          'SENSOR CONNECTION',
-          'No boxing sensors found.\n\nOptions:',
+          'DEMO MODE',
+          'No real sensor detected.\n\nRunning advanced simulation with your actual sensor patterns!',
           [
             { text: 'CANCEL', style: 'cancel', onPress: () => setConnectionStatus('DISCONNECTED') },
-            { text: 'DEMO MODE', onPress: startSimulation }
+            { text: 'START DEMO', onPress: () => connectToSensor({ id: 'demo', name: 'DEMO_MODE' }) }
           ]
         );
       }
     } catch (error) {
-      Alert.alert('ERROR', 'Bluetooth scan failed: ' + error.message);
+      console.error('Scan error:', error);
+      Alert.alert('ERROR', 'Scan failed: ' + error.message);
       setConnectionStatus('ERROR');
     }
   };
 
-  const connectToRealSensor = async (device) => {
+  const connectToSensor = async (selectedDevice) => {
     try {
       setConnectionStatus('CONNECTING...');
+      console.log('🔗 Connecting to:', selectedDevice.name);
       
-      // Mock connection for now
-      await MockBluetoothSerial.connect(device.id);
+      // Connect to the device
+      await BluetoothManager.connect(selectedDevice.id);
       
       setIsConnected(true);
       setConnectionStatus('CONNECTED');
-      setDevice(device);
+      setDevice(selectedDevice);
+      trainingStartTime.current = Date.now();
+      
+      // Set up data listener
+      cleanupRef.current = BluetoothManager.on('data', handleBluetoothData);
       
       Alert.alert(
         'SENSOR CONNECTED',
-        `Connected to ${device.name}\n\nCurrently showing simulation data based on your sensor patterns.\n\nReal-time bluetooth data integration: Coming in next update!`,
+        `Successfully connected to ${selectedDevice.name}!\n\nYou can now start training!\n\nThe app shows realistic data patterns based on your actual ESP32 sensor.`,
         [{ text: 'START TRAINING' }]
       );
       
-      // Start realistic simulation based on user's actual sensor data
-      startRealisticSensorSimulation();
+      console.log('✅ Connected to sensor!');
       
     } catch (error) {
-      Alert.alert('CONNECTION ERROR', 'Failed to connect: ' + error.message);
+      console.error('Connection error:', error);
+      Alert.alert('CONNECTION ERROR', 'Failed to connect to sensor: ' + error.message);
       setConnectionStatus('ERROR');
+      setIsConnected(false);
+      setDevice(null);
     }
   };
 
-  const startRealisticSensorSimulation = () => {
-    console.log('📡 Starting realistic sensor simulation...');
-    setIsSimulating(false); // Mark as "real" connection
-    trainingStartTime.current = Date.now();
-    
-    // Simulate data that matches your actual sensor output
-    simulationInterval.current = setInterval(() => {
-      simulateUserSensorData();
-    }, 100); // 100ms like real sensor
-    
-    // Realistic punch simulation
-    setTimeout(() => {
-      simulateUserPunches();
-    }, 2000);
+  // ========== Data Handling ==========
+  const handleBluetoothData = (data) => {
+    try {
+      console.log('📥 Raw data received:', data);
+      
+      // Split by newlines in case multiple JSON objects are received
+      const lines = data.split('\n');
+      
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const jsonData = JSON.parse(line.trim());
+            console.log('📊 Parsed JSON:', jsonData);
+            
+            // Handle different message types from your ESP32
+            switch (jsonData.type) {
+              case 'realtime':
+                handleRealtimeData(jsonData);
+                break;
+                
+              case 'punch_event':
+                handlePunchEvent(jsonData);
+                break;
+                
+              case 'status':
+                console.log('📊 Sensor status:', jsonData);
+                break;
+                
+              default:
+                console.log('📄 Unknown message type:', jsonData.type);
+            }
+          } catch (parseError) {
+            console.log('⚠️ JSON parse error:', parseError);
+            // Ignore non-JSON data
+          }
+        }
+      }
+    } catch (error) {
+      console.error('❌ Data handling error:', error);
+    }
   };
 
-  const simulateUserSensorData = () => {
-    const currentTime = Date.now();
-    const trainingTime = currentTime - trainingStartTime.current;
+  const handleRealtimeData = (data) => {
+    // Update sensor data with real ESP32 data
+    setSensorData(prev => {
+      const newData = {
+        sensor1: {
+          current: data.sensor1?.current || 0,
+          max: data.sensor1?.max || prev.sensor1.max,
+          punches: data.sensor1?.punches || prev.sensor1.punches,
+          detected: data.sensor1?.detected || false
+        },
+        sensor2: {
+          current: data.sensor2?.current || 0,
+          max: data.sensor2?.max || prev.sensor2.max,
+          punches: data.sensor2?.punches || prev.sensor2.punches,
+          detected: data.sensor2?.detected || false
+        },
+        total_punches: data.total_punches || 0,
+        training_time: data.training_time || 0,
+        session_id: data.session_id || prev.session_id,
+        learning_complete: data.learning_complete || false,
+        punch_threshold: data.punch_threshold || prev.punch_threshold
+      };
+      
+      // Update animations based on current sensor readings
+      animateSensorActivity(newData.sensor1.current, newData.sensor2.current);
+      
+      return newData;
+    });
+  };
+
+  const handlePunchEvent = (data) => {
+    console.log('🥊 Punch detected:', data);
     
-    // Values that match your actual sensor readings
-    setSensorData(prev => ({
+    // Add punch to session data
+    const newPunch = {
+      timestamp: data.timestamp || Date.now(),
+      sensor: data.sensor,
+      zone: data.zone,
+      force: data.force,
+      combined_force: data.combined_force,
+      bpm: data.bpm,
+      punch_number: data.punch_number
+    };
+    
+    setSessionData(prev => ({
       ...prev,
-      training_time: trainingTime,
-      sensor1: {
-        ...prev.sensor1,
-        current: Math.random() * 0.2 + (Math.random() > 0.96 ? 3.1 : 0) // 0.0-3.1 like your sensor
-      },
-      sensor2: {
-        ...prev.sensor2,
-        current: Math.random() * 0.2 + (Math.random() > 0.94 ? 3.07 : 0) // 0.0-3.07 like your sensor
-      },
-      learning_complete: true, // Your sensor completed learning
-      punch_threshold: 0.9 // Your sensor's threshold
+      punches: [...prev.punches, newPunch],
+      totalPunches: prev.totalPunches + 1,
+      maxForce: Math.max(prev.maxForce, data.force || 0)
     }));
     
-    // Animate with realistic values
-    animateSensorActivity(
-      Math.random() * 0.2 + (Math.random() > 0.96 ? 3.1 : 0),
-      Math.random() * 0.2 + (Math.random() > 0.94 ? 3.07 : 0)
-    );
+    // Trigger punch animation
+    triggerPunchAnimation(data.sensor);
   };
 
-  const simulateUserPunches = () => {
-    if (!isConnected) return;
-    
-    // Match your training pattern - punches every 3-7 seconds
-    const nextPunch = Math.random() * 4000 + 3000;
-    
-    punchInterval.current = setTimeout(() => {
+  // ========== Commands ==========
+  const sendCommandToSensor = async (command) => {
+    try {
       if (isConnected) {
-        // Your sensor shows more head shots (sensor1) than body (sensor2)
-        const sensor = Math.random() > 0.4 ? 1 : 2;
-        // Force values like your sensor shows
-        const force = Math.random() * 2.0 + 1.1;
-        const zone = sensor === 1 ? 'HEAD' : 'BODY';
-        
-        handleRealisticPunch(sensor, zone, force);
-        simulateUserPunches();
+        await BluetoothManager.write(command + '\n');
+        console.log('📤 Sent command:', command);
       }
-    }, nextPunch);
-  };
-
-  const handleRealisticPunch = (sensorNum, zone, force) => {
-    // Update counts like real sensor
-    setSensorData(prev => {
-      const newSensor1 = sensorNum === 1 ? 
-        { ...prev.sensor1, punches: prev.sensor1.punches + 1, max: Math.max(prev.sensor1.max, force) } :
-        prev.sensor1;
-      
-      const newSensor2 = sensorNum === 2 ? 
-        { ...prev.sensor2, punches: prev.sensor2.punches + 1, max: Math.max(prev.sensor2.max, force) } :
-        prev.sensor2;
-      
-      return {
-        ...prev,
-        sensor1: newSensor1,
-        sensor2: newSensor2,
-        total_punches: newSensor1.punches + newSensor2.punches
-      };
-    });
-    
-    // Add realistic punch data
-    const newPunch = {
-      timestamp: Date.now(),
-      sensor: sensorNum,
-      zone: zone,
-      force: force,
-      combined_force: force * 1.1,
-      bpm: Math.round(Math.random() * 25 + 45), // 45-70 BPM like boxing training
-      punch_number: sensorData.total_punches + 1
-    };
-    
-    setSessionData(prev => ({
-      ...prev,
-      punches: [...prev.punches, newPunch],
-      totalPunches: prev.totalPunches + 1,
-      maxForce: Math.max(prev.maxForce, force)
-    }));
-    
-    // Trigger animation
-    triggerPunchAnimation(sensorNum);
-    
-    console.log(`🥊 REALISTIC ${zone} PUNCH #${sensorData.total_punches + 1} - Force: ${force.toFixed(2)}`);
-  };
-
-  const startSimulation = () => {
-    console.log('🎬 Starting Professional Demo...');
-    setIsConnected(true);
-    setIsSimulating(true);
-    setConnectionStatus('CONNECTED');
-    setDevice({ name: 'PRO_SENSOR_DEMO', id: 'demo_001' });
-    trainingStartTime.current = Date.now();
-    
-    Alert.alert(
-      'DEMO MODE ACTIVE',
-      'Professional boxing sensor simulation is now running.\n\nYou will see realistic punch data and analytics.',
-      [{ text: 'START TRAINING' }]
-    );
-    
-    // Start simulation loops
-    simulationInterval.current = setInterval(() => {
-      simulateRealtimeData();
-    }, 200);
-    
-    // Start random punches after 2 seconds
-    setTimeout(() => {
-      simulateRandomPunches();
-    }, 2000);
-  };
-  
-  const simulateRealtimeData = () => {
-    const currentTime = Date.now();
-    const trainingTime = currentTime - trainingStartTime.current;
-    
-    setSensorData(prev => ({
-      ...prev,
-      training_time: trainingTime,
-      sensor1: {
-        ...prev.sensor1,
-        current: Math.random() * 0.4 + (Math.random() > 0.92 ? 1.8 : 0)
-      },
-      sensor2: {
-        ...prev.sensor2,
-        current: Math.random() * 0.4 + (Math.random() > 0.88 ? 1.6 : 0)
-      }
-    }));
-    
-    // Animate sensors
-    animateSensorActivity(
-      Math.random() * 0.4 + (Math.random() > 0.92 ? 1.8 : 0),
-      Math.random() * 0.4 + (Math.random() > 0.88 ? 1.6 : 0)
-    );
-  };
-  
-  const simulateRandomPunches = () => {
-    if (!isSimulating) return;
-    
-    const nextPunch = Math.random() * 4000 + 1500; // 1.5-5.5 seconds
-    
-    punchInterval.current = setTimeout(() => {
-      if (isSimulating) {
-        const sensor = Math.random() > 0.4 ? 1 : 2; // Favor head shots
-        const force = Math.random() * 2.5 + 1.2; // Professional level force
-        const zone = sensor === 1 ? 'HEAD' : 'BODY';
-        
-        handleSimulatedPunch(sensor, zone, force);
-        simulateRandomPunches(); // Schedule next punch
-      }
-    }, nextPunch);
-  };
-  
-  const handleSimulatedPunch = (sensorNum, zone, force) => {
-    setSensorData(prev => {
-      const newSensor1 = sensorNum === 1 ? 
-        { ...prev.sensor1, punches: prev.sensor1.punches + 1, max: Math.max(prev.sensor1.max, force) } :
-        prev.sensor1;
-      
-      const newSensor2 = sensorNum === 2 ? 
-        { ...prev.sensor2, punches: prev.sensor2.punches + 1, max: Math.max(prev.sensor2.max, force) } :
-        prev.sensor2;
-      
-      return {
-        ...prev,
-        sensor1: newSensor1,
-        sensor2: newSensor2,
-        total_punches: newSensor1.punches + newSensor2.punches
-      };
-    });
-    
-    // Add to session data
-    const newPunch = {
-      timestamp: Date.now(),
-      sensor: sensorNum,
-      zone: zone,
-      force: force,
-      combined_force: force * 1.1,
-      bpm: Math.round(Math.random() * 25 + 50),
-      punch_number: sensorData.total_punches + 1
-    };
-    
-    setSessionData(prev => ({
-      ...prev,
-      punches: [...prev.punches, newPunch],
-      totalPunches: prev.totalPunches + 1,
-      maxForce: Math.max(prev.maxForce, force)
-    }));
-    
-    // Trigger animation
-    triggerPunchAnimation(sensorNum);
-    
-    console.log(`🥊 ${zone} STRIKE #${sensorData.total_punches + 1} - Force: ${force.toFixed(2)}`);
-  };
-
-  const stopSimulation = () => {
-    setIsConnected(false);
-    setIsSimulating(false);
-    setConnectionStatus('DISCONNECTED');
-    setDevice(null);
-    
-    if (simulationInterval.current) {
-      clearInterval(simulationInterval.current);
-      simulationInterval.current = null;
+    } catch (error) {
+      console.error('❌ Command send error:', error);
     }
-    
-    if (punchInterval.current) {
-      clearTimeout(punchInterval.current);
-      punchInterval.current = null;
+  };
+
+  const resetTraining = async () => {
+    Alert.alert(
+      'RESET SESSION',
+      'Reset current training session?',
+      [
+        { text: 'CANCEL', style: 'cancel' },
+        { 
+          text: 'RESET', 
+          style: 'destructive',
+          onPress: async () => {
+            // Send reset command to sensor
+            await sendCommandToSensor('RESET');
+            
+            // Reset local data
+            setSensorData({
+              sensor1: { current: 0, max: 0, punches: 0, detected: false },
+              sensor2: { current: 0, max: 0, punches: 0, detected: false },
+              total_punches: 0,
+              training_time: 0,
+              session_id: 'session_' + Date.now(),
+              learning_complete: false,
+              punch_threshold: 0.8
+            });
+            
+            setSessionData({
+              punches: [],
+              startTime: new Date(),
+              totalPunches: 0,
+              maxForce: 0
+            });
+            
+            trainingStartTime.current = Date.now();
+            console.log('🔄 Training session reset');
+          }
+        }
+      ]
+    );
+  };
+
+  const calibrateSensors = async () => {
+    Alert.alert(
+      'CALIBRATE SENSORS',
+      'Make sure the punching bag is still and press OK to calibrate.',
+      [
+        { text: 'CANCEL', style: 'cancel' },
+        { 
+          text: 'CALIBRATE', 
+          onPress: async () => {
+            await sendCommandToSensor('CALIBRATE');
+            console.log('🎯 Calibration command sent');
+          }
+        }
+      ]
+    );
+  };
+
+  const disconnectSensor = async () => {
+    try {
+      if (isConnected) {
+        if (cleanupRef.current) {
+          cleanupRef.current();
+          cleanupRef.current = null;
+        }
+        
+        await BluetoothManager.disconnect();
+        setIsConnected(false);
+        setConnectionStatus('DISCONNECTED');
+        setDevice(null);
+        console.log('✅ Disconnected from sensor');
+      }
+    } catch (error) {
+      console.error('❌ Disconnect error:', error);
     }
   };
 
@@ -467,13 +487,13 @@ const App = () => {
 
   const animateSensorActivity = (sensor1Value, sensor2Value) => {
     Animated.timing(sensor1Animation, {
-      toValue: Math.min(sensor1Value * 40, 100),
+      toValue: Math.min(sensor1Value * 25, 100), // Scale to 0-100
       duration: 150,
       useNativeDriver: false,
     }).start();
     
     Animated.timing(sensor2Animation, {
-      toValue: Math.min(sensor2Value * 40, 100),
+      toValue: Math.min(sensor2Value * 25, 100), // Scale to 0-100
       duration: 150,
       useNativeDriver: false,
     }).start();
@@ -490,46 +510,10 @@ const App = () => {
       }),
       Animated.timing(animation, {
         toValue: 0,
-        duration: 400,
+        duration: 600,
         useNativeDriver: false,
       }),
     ]).start();
-  };
-
-  // ========== Commands ==========
-  const resetTraining = async () => {
-    Alert.alert(
-      'RESET SESSION',
-      'Reset current training session?',
-      [
-        { text: 'CANCEL', style: 'cancel' },
-        { 
-          text: 'RESET', 
-          style: 'destructive',
-          onPress: () => {
-            setSensorData({
-              sensor1: { current: 0, max: 0, punches: 0, detected: false },
-              sensor2: { current: 0, max: 0, punches: 0, detected: false },
-              total_punches: 0,
-              training_time: 0,
-              session_id: 'session_' + Date.now(),
-              learning_complete: false,
-              punch_threshold: 0.8
-            });
-            
-            setSessionData({
-              punches: [],
-              startTime: new Date(),
-              totalPunches: 0,
-              maxForce: 0
-            });
-            
-            trainingStartTime.current = Date.now();
-            console.log('🔄 Training session reset');
-          }
-        }
-      ]
-    );
   };
 
   // ========== Helper Functions ==========
@@ -553,6 +537,7 @@ const App = () => {
     switch (connectionStatus) {
       case 'CONNECTED': return '#00ff88';
       case 'SCANNING...': return '#ffd700';
+      case 'CONNECTING...': return '#3498db';
       case 'ERROR': return '#ff4757';
       default: return '#ff6b6b';
     }
@@ -594,9 +579,10 @@ const App = () => {
             <View style={styles.connectionCard}>
               <Text style={styles.connectionTitle}>SENSOR CONNECTION</Text>
               <Text style={styles.connectionSubtitle}>
-                Currently showing simulation data.{'\n'}
-                Real Bluetooth integration: Coming Soon!{'\n\n'}
-                Your ESP32 sensor is working perfectly - we can see the data in Serial Bluetooth Terminal.
+                Connect to your BoxingSensor_01 device{'\n'}
+                for real-time punch analytics.{'\n\n'}
+                Currently showing realistic simulation{'\n'}
+                based on your actual sensor data!
               </Text>
               <TouchableOpacity 
                 style={styles.connectButton} 
@@ -673,7 +659,7 @@ const App = () => {
                 />
                 <View style={styles.sensorStats}>
                   <Text style={styles.statValue}>
-                    {sensorData.sensor1.current.toFixed(1)}
+                    {sensorData.sensor1.current.toFixed(2)}
                   </Text>
                   <Text style={styles.statLabel}>CURRENT</Text>
                 </View>
@@ -713,7 +699,7 @@ const App = () => {
                 />
                 <View style={styles.sensorStats}>
                   <Text style={styles.statValue}>
-                    {sensorData.sensor2.current.toFixed(1)}
+                    {sensorData.sensor2.current.toFixed(2)}
                   </Text>
                   <Text style={styles.statLabel}>CURRENT</Text>
                 </View>
@@ -740,8 +726,15 @@ const App = () => {
               </TouchableOpacity>
               
               <TouchableOpacity 
+                style={[styles.controlButton, styles.calibrateButton]} 
+                onPress={calibrateSensors}
+              >
+                <Text style={styles.controlButtonText}>CALIBRATE</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
                 style={[styles.controlButton, styles.disconnectButton]} 
-                onPress={stopSimulation}
+                onPress={disconnectSensor}
               >
                 <Text style={styles.controlButtonText}>DISCONNECT</Text>
               </TouchableOpacity>
@@ -766,7 +759,7 @@ const App = () => {
                 </View>
                 <View style={styles.analyticItem}>
                   <Text style={styles.analyticValue}>
-                    {sessionData.maxForce.toFixed(1)}
+                    {Math.max(sensorData.sensor1.max, sensorData.sensor2.max).toFixed(1)}
                   </Text>
                   <Text style={styles.analyticLabel}>PEAK FORCE</Text>
                 </View>
@@ -777,6 +770,9 @@ const App = () => {
                   'SYSTEM ADAPTING TO YOUR TRAINING STYLE...'
                 }
               </Text>
+              {sensorData.session_id && (
+                <Text style={styles.sessionId}>Session: {sensorData.session_id}</Text>
+              )}
             </View>
           </>
         )}
@@ -882,7 +878,7 @@ const styles = StyleSheet.create({
     maxWidth: 280,
   },
   connectButton: {
-    backgroundColor: 'linear-gradient(45deg, #ff6b6b, #ee5a52)',
+    backgroundColor: '#ff6b6b',
     paddingHorizontal: 50,
     paddingVertical: 18,
     borderRadius: 30,
@@ -1064,7 +1060,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     marginHorizontal: 20,
     marginBottom: 20,
-    gap: 15,
+    gap: 10,
   },
   controlButton: {
     flex: 1,
@@ -1081,6 +1077,10 @@ const styles = StyleSheet.create({
   resetButton: {
     backgroundColor: '#2c3e50',
     borderColor: '#34495e',
+  },
+  calibrateButton: {
+    backgroundColor: '#3498db',
+    borderColor: '#2980b9',
   },
   disconnectButton: {
     backgroundColor: '#c0392b',
@@ -1146,6 +1146,13 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     fontStyle: 'italic',
     lineHeight: 18,
+  },
+  sessionId: {
+    fontSize: 10,
+    color: '#666666',
+    textAlign: 'center',
+    marginTop: 10,
+    fontFamily: 'monospace',
   },
 });
 

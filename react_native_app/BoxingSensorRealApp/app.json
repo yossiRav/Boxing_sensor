@@ -1,9 +1,48 @@
 {
-  "name": "BoxingSensorRealApp",
-  "displayName": "BoxingSensorRealApp",
-  "extra": {
-    "eas": {
-      "projectId": "193b86a4-d4f0-4b57-81f0-2909abc29410"
+  "expo": {
+    "name": "Boxing Sensor Pro",
+    "slug": "boxing-sensor-real",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#000000",
+      "resizeMode": "contain"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.boxingsensor.app"
+    },
+    "android": {
+      "permissions": [
+        "BLUETOOTH",
+        "BLUETOOTH_ADMIN",
+        "BLUETOOTH_CONNECT",
+        "BLUETOOTH_SCAN",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ],
+      "package": "com.boxingsensor.app"
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 34,
+            "targetSdkVersion": 34,
+            "buildToolsVersion": "34.0.0"
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "12de22a5-0e38-45e1-8909-7ddbd157c7c6"
+      }
     }
   }
 }
