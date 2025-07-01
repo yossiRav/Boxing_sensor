@@ -1,40 +1,41 @@
 /*
- * חיישן אגרוף בלוטות' - גרסה יעילה עם כיול דינמי
+ * Boxing Sensor with Bluetooth - Optimized with Dynamic Calibration
  * ESP32 + 2x MPU6050 + Bluetooth Classic
  * 
- * זיהוי מכות אמיתיות בלבד עם כיול אוטומטי לשינויי מיקום
+ * Detects only real punches with automatic recalibration for position changes
+ * Improved resolution for accurate punch detection
  * 
- * מיקום חיישנים על השק:
- * חיישן 1: עליון (ראש/גוף) - SDA=21, SCL=22, כתובת=0x68
- * חיישן 2: תחתון (כבד) - SDA=25, SCL=26, כתובת=0x68
+ * Sensor placement on the punching bag:
+ * Sensor 1: Upper (head/body) - SDA=21, SCL=22, address=0x68
+ * Sensor 2: Lower (heavy) - SDA=25, SCL=26, address=0x68
  * 
- * קובץ: boxing_sensor_optimized.ino
- * תאריך: יולי 2025
+ * File: boxing_sensor_bluetooth.ino
+ * Date: July 2025
  */
 
 #include <Wire.h>
 #include <BluetoothSerial.h>
 #include <ArduinoJson.h>
 
-// בלוטות'
+// Bluetooth
 BluetoothSerial SerialBT;
 String device_name = "BoxingSensor_01";
 
-// פיני I2C
+// I2C pins
 #define SDA1 21
 #define SCL1 22
 #define SDA2 25
 #define SCL2 26
 
-// כתובות חיישנים
+// Sensor addresses
 #define MPU6050_ADDR1 0x68
 #define MPU6050_ADDR2 0x68
 
-// שני I2C buses
+// Two I2C buses
 TwoWire I2C_1 = TwoWire(0);
 TwoWire I2C_2 = TwoWire(1);
 
-// מבנה נתונים לחיישן
+// Sensor data structure
 struct SensorData {
     float current_punch;
     float max_punch;
@@ -46,48 +47,48 @@ struct SensorData {
     float moving_avg_x, moving_avg_y, moving_avg_z;
     int stable_count;
     unsigned long last_recalibration;
-    float stability_buffer[10]; // מוקטן ל-10 דגימות
+    float stability_buffer[10]; // 10 samples for stability
     int stability_index;
     bool is_stable;
     float current_stability_baseline_x, current_stability_baseline_y, current_stability_baseline_z;
     unsigned long stability_start_time;
     float acceleration_peak;
-    bool in_motion;
-    unsigned long motion_start_time;
+    bool in_punch_event;
+    unsigned long punch_event_start;
     float variance_threshold;
     unsigned long last_significant_motion;
 };
 
 SensorData sensor1, sensor2;
 
-// משתנים גלובליים
+// Global variables
 unsigned long training_start_time = 0;
 int total_punches = 0;
 String session_id = "";
 
-// הגדרות
+// Configuration
 float PUNCH_THRESHOLD = 1.0;
-const unsigned long COOLDOWN_BETWEEN_PUNCHES = 100; // 100ms = 10 מכות/שנייה
-const unsigned long SENSOR_RESET_TIME = 50;
+const unsigned long COOLDOWN_BETWEEN_PUNCHES = 100; // 100ms = 10 punches/second
+const unsigned long SENSOR_RESET_TIME = 80;         // Extended to 80ms to avoid double-counting
 const unsigned long STABLE_POSITION_TIMEOUT = 2000;
 const int STABILITY_REQUIRED_SAMPLES = 10;
 const float STABILITY_VARIANCE_THRESHOLD = 0.015;
 const unsigned long MIN_STABILITY_TIME = 500;
 const unsigned long MOTION_COOLDOWN = 400;
 
-// למידה אוטומטית
+// Adaptive learning
 const int LEARNING_SAMPLE_SIZE = 10;
 float learning_forces[LEARNING_SAMPLE_SIZE];
 int learning_index = 0;
 bool learning_complete = false;
 
-// שליחת נתונים
+// Data sending
 unsigned long last_data_send = 0;
 const unsigned long DATA_SEND_INTERVAL = 100;
 unsigned long last_status_send = 0;
 const unsigned long DATA_STATUS_INTERVAL = 1000;
 
-// הכרזות פונקציות
+// Function declarations
 void resetSensorData(SensorData* sensor);
 void initMPU6050(TwoWire* wire, const char* name, byte addr);
 void readSensor(TwoWire* wire, SensorData* sensor, byte addr);
@@ -113,8 +114,8 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
     
-    Serial.println(F("חיישן אגרוף משופר - כיול דינמי"));
-    Serial.println(F("מאתחל מערכת..."));
+    Serial.println(F("Boxing Sensor - Optimized with Dynamic Calibration"));
+    Serial.println(F("Initializing system..."));
     
     resetSensorData(&sensor1);
     resetSensorData(&sensor2);
@@ -122,38 +123,38 @@ void setup() {
     training_start_time = millis();
     session_id = "session_" + String(millis());
     
-    Serial.println(F("מאתחל I2C..."));
+    Serial.println(F("Initializing I2C..."));
     I2C_1.begin(SDA1, SCL1, 100000);
     I2C_2.begin(SDA2, SCL2, 100000);
     
-    Serial.printf("I2C_1: SDA=%d, SCL=%d (כתובת 0x%02X)\n", SDA1, SCL1, MPU6050_ADDR1);
-    Serial.printf("I2C_2: SDA=%d, SCL=%d (כתובת 0x%02X)\n", SDA2, SCL2, MPU6050_ADDR2);
+    Serial.printf("I2C_1: SDA=%d, SCL=%d (address 0x%02X)\n", SDA1, SCL1, MPU6050_ADDR1);
+    Serial.printf("I2C_2: SDA=%d, SCL=%d (address 0x%02X)\n", SDA2, SCL2, MPU6050_ADDR2);
     
     delay(100);
     
-    Serial.println(F("מאתחל חיישנים..."));
-    initMPU6050(&I2C_1, "עליון", MPU6050_ADDR1);
-    initMPU6050(&I2C_2, "תחתון", MPU6050_ADDR2);
+    Serial.println(F("Initializing sensors..."));
+    initMPU6050(&I2C_1, "Upper", MPU6050_ADDR1);
+    initMPU6050(&I2C_2, "Lower", MPU6050_ADDR2);
     
     delay(500);
     
-    Serial.println(F("מכייל חיישנים..."));
-    calibrateSensor(&I2C_1, &sensor1, "עליון", MPU6050_ADDR1);
-    calibrateSensor(&I2C_2, &sensor2, "תחתון", MPU6050_ADDR2);
+    Serial.println(F("Calibrating sensors..."));
+    calibrateSensor(&I2C_1, &sensor1, "Upper", MPU6050_ADDR1);
+    calibrateSensor(&I2C_2, &sensor2, "Lower", MPU6050_ADDR2);
     
-    Serial.println(F("מפעיל בלוטות'..."));
+    Serial.println(F("Starting Bluetooth..."));
     if (!SerialBT.begin(device_name)) {
-        Serial.println(F("שגיאה באתחול בלוטות'!"));
+        Serial.println(F("Bluetooth initialization failed"));
         return;
     }
     
-    Serial.println(F("בלוטות' מופעל בהצלחה!"));
-    Serial.print(F("שם המכשיר: "));
+    Serial.println(F("Bluetooth started successfully"));
+    Serial.print(F("Device name: "));
     Serial.println(device_name);
-    Serial.println(F("ממתין לחיבור מהאפליקציה..."));
+    Serial.println(F("Waiting for app connection..."));
     
-    Serial.println(F("מערכת מוכנה לאימון!"));
-    Serial.println(F("לוג פעילות:"));
+    Serial.println(F("System ready for training"));
+    Serial.println(F("Activity log:"));
     Serial.println(F("================"));
 }
 
@@ -177,7 +178,7 @@ void loop() {
         last_status = millis();
     }
     
-    delay(8); // דגימה ב-100Hz
+    delay(5); // 200Hz sampling for better resolution
 }
 
 void resetSensorData(SensorData* sensor) {
@@ -202,8 +203,8 @@ void resetSensorData(SensorData* sensor) {
     sensor->current_stability_baseline_z = 0.0;
     sensor->stability_start_time = 0;
     sensor->acceleration_peak = 0.0;
-    sensor->in_motion = false;
-    sensor->motion_start_time = 0;
+    sensor->in_punch_event = false;
+    sensor->punch_event_start = 0;
     sensor->variance_threshold = STABILITY_VARIANCE_THRESHOLD;
     sensor->last_significant_motion = 0;
     
@@ -213,7 +214,7 @@ void resetSensorData(SensorData* sensor) {
 }
 
 void initMPU6050(TwoWire* wire, const char* name, byte addr) {
-    Serial.print(F("מאתחל "));
+    Serial.print(F("Initializing "));
     Serial.print(name);
     Serial.print(F(" (0x"));
     Serial.print(addr, HEX);
@@ -223,7 +224,7 @@ void initMPU6050(TwoWire* wire, const char* name, byte addr) {
     byte error = wire->endTransmission();
     
     if (error == 0) {
-        Serial.println(F("זוהה"));
+        Serial.println(F("Detected"));
         
         wire->beginTransmission(addr);
         wire->write(0x6B);
@@ -238,16 +239,16 @@ void initMPU6050(TwoWire* wire, const char* name, byte addr) {
         
         if (wire->available()) {
             byte whoami = wire->read();
-            Serial.print(F("חיישן "));
+            Serial.print(F("Sensor "));
             Serial.print(name);
-            Serial.print(F(" מחובר (ID: 0x"));
+            Serial.print(F(" connected (ID: 0x"));
             Serial.print(whoami, HEX);
             Serial.println(F(")"));
         }
     } else {
-        Serial.print(F("שגיאה "));
+        Serial.print(F("Error "));
         Serial.print(error);
-        Serial.println(F(" - בדוק חיווט"));
+        Serial.println(F(" - Check wiring"));
     }
 }
 
@@ -285,17 +286,21 @@ void readSensor(TwoWire* wire, SensorData* sensor, byte addr) {
         
         if (magnitude > PUNCH_THRESHOLD) {
             sensor->current_punch = magnitude;
-            sensor->in_motion = true;
-            sensor->motion_start_time = current_time;
-            sensor->last_significant_motion = current_time;
-            
-            if (magnitude > sensor->acceleration_peak) {
+            if (!sensor->in_punch_event) {
+                sensor->in_punch_event = true;
+                sensor->punch_event_start = current_time;
+                sensor->acceleration_peak = magnitude;
+            } else if (magnitude > sensor->acceleration_peak) {
                 sensor->acceleration_peak = magnitude;
             }
-        } else if (magnitude < PUNCH_THRESHOLD * 0.3) {
-            sensor->in_motion = false;
-            sensor->current_punch = 0.0;
-            sensor->acceleration_peak = 0.0;
+            sensor->last_significant_motion = current_time;
+        } else if (magnitude < PUNCH_THRESHOLD * 0.3 && sensor->in_punch_event) {
+            if (current_time - sensor->punch_event_start > SENSOR_RESET_TIME) {
+                sensor->in_punch_event = false;
+                sensor->current_punch = sensor->acceleration_peak;
+            } else {
+                sensor->current_punch = magnitude;
+            }
         } else {
             sensor->current_punch = magnitude;
         }
@@ -333,7 +338,7 @@ void updateStabilityTracking(SensorData* sensor, float ax, float ay, float az) {
         sensor->current_stability_baseline_y = ay;
         sensor->current_stability_baseline_z = az;
         
-        Serial.print(F("מיקום יציב חדש: ("));
+        Serial.print(F("New stable position: ("));
         Serial.print(ax, 2);
         Serial.print(F(", "));
         Serial.print(ay, 2);
@@ -350,7 +355,7 @@ void updateStabilityTracking(SensorData* sensor, float ax, float ay, float az) {
     } else if (!currently_stable && sensor->is_stable) {
         sensor->is_stable = false;
         sensor->last_significant_motion = current_time;
-        Serial.println(F("תנועה זוהתה"));
+        Serial.println(F("Motion detected"));
     }
 }
 
@@ -387,7 +392,7 @@ void updateMovingBaseline(SensorData* sensor, float ax, float ay, float az) {
             sensor->last_recalibration = current_time;
             sensor->stable_count = 0;
             
-            Serial.println(F("כיול אוטומטי - מיקום חדש"));
+            Serial.println(F("Automatic recalibration - New position"));
         }
     } else {
         sensor->stable_count = 0;
@@ -400,16 +405,17 @@ void detectPunch(SensorData* sensor) {
     bool can_detect_punch = !isCurrentlyStable(sensor) || 
                            (current_time - sensor->last_significant_motion) < MOTION_COOLDOWN;
     
-    if (sensor->current_punch > PUNCH_THRESHOLD && 
+    if (sensor->in_punch_event && 
         !sensor->punch_detected && 
         can_detect_punch &&
-        (current_time - sensor->last_detection > SENSOR_RESET_TIME)) {
+        (current_time - sensor->punch_event_start > SENSOR_RESET_TIME) &&
+        (current_time - sensor->last_detection > COOLDOWN_BETWEEN_PUNCHES)) {
         
         sensor->punch_detected = true;
         sensor->last_detection = current_time;
     }
     
-    if (sensor->current_punch < PUNCH_THRESHOLD * 0.3) {
+    if (!sensor->in_punch_event) {
         sensor->punch_detected = false;
     }
 }
@@ -425,16 +431,16 @@ void detectSmartPunch() {
         int winning_sensor = 0;
         String winning_zone = "";
         
-        if (sensor1.current_punch > max_force && sensor1.current_punch > PUNCH_THRESHOLD) {
+        if (sensor1.punch_detected && sensor1.current_punch > max_force && sensor1.current_punch > PUNCH_THRESHOLD) {
             max_force = sensor1.current_punch;
             winning_sensor = 1;
-            winning_zone = "עליון";
+            winning_zone = "Upper";
         }
         
-        if (sensor2.current_punch > max_force && sensor2.current_punch > PUNCH_THRESHOLD) {
+        if (sensor2.punch_detected && sensor2.current_punch > max_force && sensor2.current_punch > PUNCH_THRESHOLD) {
             max_force = sensor2.current_punch;
             winning_sensor = 2;
-            winning_zone = "תחתון";
+            winning_zone = "Lower";
         }
         
         if (winning_sensor > 0) {
@@ -466,18 +472,18 @@ void detectSmartPunch() {
                 
                 last_punch_time_for_bpm = current_time;
                 
-                Serial.print(F("מכה "));
+                Serial.print(F("Punch "));
                 Serial.print(winning_zone);
                 Serial.print(F(" #"));
                 Serial.print((winning_sensor == 1 ? sensor1.punch_count : sensor2.punch_count));
-                Serial.print(F(" עוצמה: "));
+                Serial.print(F(" Force: "));
                 Serial.print(max_force, 2);
-                Serial.print(F(" (משולב: "));
+                Serial.print(F(" (Combined: "));
                 Serial.print(combined_force, 2);
                 Serial.print(F(")"));
                 
                 Serial.print(F(" ["));
-                Serial.print(isCurrentlyStable(winning_sensor_data) ? F("יציב") : F("בתנועה"));
+                Serial.print(isCurrentlyStable(winning_sensor_data) ? F("Stable") : F("In motion"));
                 Serial.print(F("]"));
                 
                 if (bpm > 0 && bpm < 300) {
@@ -486,21 +492,21 @@ void detectSmartPunch() {
                 }
                 
                 if (!learning_complete) {
-                    Serial.print(F(" [למידה "));
+                    Serial.print(F(" [Learning "));
                     Serial.print(learning_index);
                     Serial.print(F("/"));
                     Serial.print(LEARNING_SAMPLE_SIZE);
                     Serial.print(F("]"));
                 }
                 
-                Serial.print(F(" | סה''כ: "));
+                Serial.print(F(" | Total: "));
                 Serial.println(sensor1.punch_count + sensor2.punch_count);
                 
                 sendPunchEventToBluetooth(winning_sensor, winning_zone, max_force, combined_force, bpm);
                 
                 last_smart_detection = current_time;
             } else {
-                Serial.println(F("מכה נחסמה - חיישן יציב"));
+                Serial.println(F("Punch blocked - Sensor stable"));
             }
         }
     }
@@ -529,15 +535,15 @@ void adaptToUser(float force) {
             
             learning_complete = true;
             
-            Serial.println(F("למידה הושלמה"));
-            Serial.print(F("רף חדש: "));
+            Serial.println(F("Learning completed"));
+            Serial.print(F("New threshold: "));
             Serial.println(PUNCH_THRESHOLD, 2);
         }
     }
 }
 
 void calibrateSensor(TwoWire* wire, SensorData* sensor, const char* name, byte addr) {
-    Serial.print(F("מכייל "));
+    Serial.print(F("Calibrating "));
     Serial.print(name);
     Serial.print(F("..."));
     
@@ -577,7 +583,7 @@ void calibrateSensor(TwoWire* wire, SensorData* sensor, const char* name, byte a
         sensor->current_stability_baseline_y = sensor->baseline_y;
         sensor->current_stability_baseline_z = sensor->baseline_z;
         
-        Serial.print(F("הושלם: ("));
+        Serial.print(F("Completed: ("));
         Serial.print(sensor->baseline_x, 2);
         Serial.print(F(", "));
         Serial.print(sensor->baseline_y, 2);
@@ -585,14 +591,14 @@ void calibrateSensor(TwoWire* wire, SensorData* sensor, const char* name, byte a
         Serial.print(sensor->baseline_z, 2);
         Serial.println(F(")"));
     } else {
-        Serial.println(F("שגיאה בכיול"));
+        Serial.println(F("Calibration failed"));
     }
 }
 
 void sendDataToBluetooth() {
     if (millis() - last_data_send < DATA_SEND_INTERVAL) return;
     
-    StaticJsonDocument<128> doc; // מוקטן מ-200
+    StaticJsonDocument<128> doc;
     doc["session_id"] = session_id;
     doc["upper_punch"] = roundFloat(sensor1.current_punch, 2);
     doc["lower_punch"] = roundFloat(sensor2.current_punch, 2);
@@ -661,32 +667,32 @@ void resetTraining() {
     session_id = "session_" + String(millis());
     learning_index = 0;
     learning_complete = false;
-    Serial.println(F("אימון אופס"));
+    Serial.println(F("Training reset"));
 }
 
 void calibrateAllSensors() {
-    Serial.println(F("מכייל מחדש חיישנים..."));
-    calibrateSensor(&I2C_1, &sensor1, "עליון", MPU6050_ADDR1);
-    calibrateSensor(&I2C_2, &sensor2, "תחתון", MPU6050_ADDR2);
-    Serial.println(F("כיול הושלם"));
+    Serial.println(F("Recalibrating sensors..."));
+    calibrateSensor(&I2C_1, &sensor1, "Upper", MPU6050_ADDR1);
+    calibrateSensor(&I2C_2, &sensor2, "Lower", MPU6050_ADDR2);
+    Serial.println(F("Calibration completed"));
 }
 
 void printStatus() {
-    Serial.println(F("סטטוס מערכת:"));
-    Serial.print(F("חיישן עליון: "));
+    Serial.println(F("System status:"));
+    Serial.print(F("Upper sensor: "));
     Serial.print(sensor1.punch_count);
-    Serial.print(F(" מכות, עוצמה: "));
+    Serial.print(F(" punches, Force: "));
     Serial.println(sensor1.current_punch, 2);
     
-    Serial.print(F("חיישן תחתון: "));
+    Serial.print(F("Lower sensor: "));
     Serial.print(sensor2.punch_count);
-    Serial.print(F(" מכות, עוצמה: "));
+    Serial.print(F(" punches, Force: "));
     Serial.println(sensor2.current_punch, 2);
     
-    Serial.print(F("סה\"כ מכות: "));
+    Serial.print(F("Total punches: "));
     Serial.println(total_punches);
     
-    Serial.print(F("רף זיהוי: "));
+    Serial.print(F("Detection threshold: "));
     Serial.println(PUNCH_THRESHOLD, 2);
 }
 
