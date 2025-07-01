@@ -1,40 +1,41 @@
 /*
- * חיישן אגרוף בלוטות' - גרסה יעילה עם כיול דינמי
+ * חיישן אגרוף בלוטות' - מתוקן למניעת מכות כוזבות (קוד מלא)
  * ESP32 + 2x MPU6050 + Bluetooth Classic
  * 
- * זיהוי מכות אמיתיות בלבד עם כיול אוטומטי לשינויי מיקום
+ * פתרון לבעיית מכות כוזבות כשהחיישן במצב יציב חדש
  * 
  * מיקום חיישנים על השק:
  * חיישן 1: עליון (ראש/גוף) - SDA=21, SCL=22, כתובת=0x68
  * חיישן 2: תחתון (כבד) - SDA=25, SCL=26, כתובת=0x68
  * 
- * קובץ: boxing_sensor_optimized.ino
+ * קובץ: boxing_sensor_fixed_complete.ino
  * תאריך: יולי 2025
+ * קוד מלא עם מניעת מכות כוזבות
  */
 
 #include <Wire.h>
-#include <BluetoothSerial.h>
+#include "BluetoothSerial.h"
 #include <ArduinoJson.h>
 
 // בלוטות'
 BluetoothSerial SerialBT;
 String device_name = "BoxingSensor_01";
 
-// פיני I2C
-#define SDA1 21
+// פיני I2C לשני חיישנים
+#define SDA1 21  // חיישן עליון
 #define SCL1 22
-#define SDA2 25
+#define SDA2 25  // חיישן תחתון
 #define SCL2 26
 
-// כתובות חיישנים
-#define MPU6050_ADDR1 0x68
-#define MPU6050_ADDR2 0x68
+// כתובות חיישנים - שניהם באותה כתובת (0x68)
+#define MPU6050_ADDR1 0x68  // חיישן עליון (AD0=GND)
+#define MPU6050_ADDR2 0x68  // חיישן תחתון (AD0=GND) - אותה כתובת!
 
 // שני I2C buses
 TwoWire I2C_1 = TwoWire(0);
 TwoWire I2C_2 = TwoWire(1);
 
-// מבנה נתונים לחיישן
+// מבנה נתונים לכל חיישן
 struct SensorData {
     float current_punch;
     float max_punch;
@@ -43,37 +44,48 @@ struct SensorData {
     bool punch_detected;
     unsigned long last_detection;
     unsigned long last_punch_time;
+    
+    // קליברציה דינמית מתקדמת - מניעת מכות כוזבות
     float moving_avg_x, moving_avg_y, moving_avg_z;
     int stable_count;
     unsigned long last_recalibration;
-    float stability_buffer[10]; // מוקטן ל-10 דגימות
+    
+    // זיהוי יציבות מתקדם
+    float stability_buffer[10];  // מאגר של 10 קריאות אחרונות
     int stability_index;
     bool is_stable;
     float current_stability_baseline_x, current_stability_baseline_y, current_stability_baseline_z;
     unsigned long stability_start_time;
+    
+    // זיהוי תנועה אמיתית (מכה)
     float acceleration_peak;
     bool in_motion;
     unsigned long motion_start_time;
+    
+    // מניעת מכות כוזבות
     float variance_threshold;
+    bool recently_moved;
     unsigned long last_significant_motion;
 };
 
-SensorData sensor1, sensor2;
+SensorData sensor1; // עליון (ראש/גוף)
+SensorData sensor2; // תחתון (כבד)
 
 // משתנים גלובליים
 unsigned long training_start_time = 0;
 int total_punches = 0;
 String session_id = "";
 
-// הגדרות
-float PUNCH_THRESHOLD = 1.0;
-const unsigned long COOLDOWN_BETWEEN_PUNCHES = 100; // 100ms = 10 מכות/שנייה
-const unsigned long SENSOR_RESET_TIME = 50;
-const unsigned long STABLE_POSITION_TIMEOUT = 2000;
-const int STABILITY_REQUIRED_SAMPLES = 10;
-const float STABILITY_VARIANCE_THRESHOLD = 0.015;
-const unsigned long MIN_STABILITY_TIME = 500;
-const unsigned long MOTION_COOLDOWN = 400;
+// הגדרות מעקב אגרופים - מתקדמות למניעת מכות כוזבות
+float PUNCH_THRESHOLD = 0.8;
+const unsigned long COOLDOWN_BETWEEN_PUNCHES = 120;  // 120ms = 8.3 מכות/שנייה
+const unsigned long SENSOR_RESET_TIME = 50;         // 50ms = זמן מינימלי לזיהוי מכה חדשה
+
+// הגדרות יציבות חדשות - מתקדמות
+const int STABILITY_REQUIRED_SAMPLES = 8;           // 8 דגימות יציבות = 80ms
+const float STABILITY_VARIANCE_THRESHOLD = 0.02;    // רף שונות נמוך ליציבות
+const unsigned long MIN_STABILITY_TIME = 200;       // 200ms מינימום יציבות
+const unsigned long SIGNIFICANT_MOTION_COOLDOWN = 300; // 300ms לאחר תנועה משמעותית
 
 // למידה אוטומטית
 const int LEARNING_SAMPLE_SIZE = 10;
@@ -81,11 +93,11 @@ float learning_forces[LEARNING_SAMPLE_SIZE];
 int learning_index = 0;
 bool learning_complete = false;
 
-// שליחת נתונים
+// משתנים לשליחת נתונים
 unsigned long last_data_send = 0;
-const unsigned long DATA_SEND_INTERVAL = 100;
+const unsigned long DATA_SEND_INTERVAL = 100; // שליחה כל 100ms
 unsigned long last_status_send = 0;
-const unsigned long DATA_STATUS_INTERVAL = 1000;
+const unsigned long STATUS_SEND_INTERVAL = 1000; // סטטוס כל שנייה
 
 // הכרזות פונקציות
 void resetSensorData(SensorData* sensor);
@@ -113,16 +125,18 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
     
-    Serial.println(F("חיישן אגרוף משופר - כיול דינמי"));
-    Serial.println(F("מאתחל מערכת..."));
+    Serial.println("=== חיישן אגרוף מתקדם - ללא מכות כוזבות ===");
+    Serial.println("מאתחל מערכת...");
     
+    // איפוס משתנים
     resetSensorData(&sensor1);
     resetSensorData(&sensor2);
     total_punches = 0;
     training_start_time = millis();
     session_id = "session_" + String(millis());
     
-    Serial.println(F("מאתחל I2C..."));
+    // אתחול I2C
+    Serial.println("🔧 מאתחל I2C buses...");
     I2C_1.begin(SDA1, SCL1, 100000);
     I2C_2.begin(SDA2, SCL2, 100000);
     
@@ -131,53 +145,64 @@ void setup() {
     
     delay(100);
     
-    Serial.println(F("מאתחל חיישנים..."));
-    initMPU6050(&I2C_1, "עליון", MPU6050_ADDR1);
-    initMPU6050(&I2C_2, "תחתון", MPU6050_ADDR2);
+    // אתחול חיישנים
+    Serial.println("\n📡 מאתחל חיישנים...");
+    initMPU6050(&I2C_1, "עליון (ראש/גוף)", MPU6050_ADDR1);
+    initMPU6050(&I2C_2, "תחתון (כבד)", MPU6050_ADDR2);
     
     delay(500);
     
-    Serial.println(F("מכייל חיישנים..."));
+    // קליברציה ראשונית
+    Serial.println("\n⚖️ מכייל חיישנים...");
     calibrateSensor(&I2C_1, &sensor1, "עליון", MPU6050_ADDR1);
     calibrateSensor(&I2C_2, &sensor2, "תחתון", MPU6050_ADDR2);
     
-    Serial.println(F("מפעיל בלוטות'..."));
+    // אתחול בלוטות'
+    Serial.println("\n🔵 מפעיל בלוטות'...");
     if (!SerialBT.begin(device_name)) {
-        Serial.println(F("שגיאה באתחול בלוטות'!"));
+        Serial.println("❌ שגיאה באתחול בלוטות'!");
         return;
     }
     
-    Serial.println(F("בלוטות' מופעל בהצלחה!"));
-    Serial.print(F("שם המכשיר: "));
+    Serial.println("✅ בלוטות' מופעל בהצלחה!");
+    Serial.print("📱 שם המכשיר: ");
     Serial.println(device_name);
-    Serial.println(F("ממתין לחיבור מהאפליקציה..."));
+    Serial.println("⏳ ממתין לחיבור מהאפליקציה...");
     
-    Serial.println(F("מערכת מוכנה לאימון!"));
-    Serial.println(F("לוג פעילות:"));
-    Serial.println(F("================"));
+    Serial.println("\n🥊 מערכת מוכנה לאימון!");
+    Serial.println("🛡️  מערכת מתקדמת למניעת מכות כוזבות מופעלת!");
+    Serial.println("📋 לוג פעילות:");
+    Serial.println("================");
 }
 
 void loop() {
+    // קריאת נתוני חיישנים
     readSensor(&I2C_1, &sensor1, MPU6050_ADDR1);
     delay(2);
     readSensor(&I2C_2, &sensor2, MPU6050_ADDR2);
     
+    // זיהוי מכות
     detectPunch(&sensor1);
     detectPunch(&sensor2);
     detectSmartPunch();
     
+    // עדכון סיכום
     total_punches = sensor1.punch_count + sensor2.punch_count;
     
+    // שליחת נתונים לאפליקציה
     sendDataToBluetooth();
+    
+    // טיפול בפקודות מהאפליקציה
     handleBluetoothCommands();
     
+    // הדפסת מצב ב-Serial כל 3 שניות
     static unsigned long last_status = 0;
     if (millis() - last_status > 3000) {
         printStatus();
         last_status = millis();
     }
     
-    delay(8); // דגימה ב-100Hz
+    delay(10); // דגימה מהירה - 100Hz
 }
 
 void resetSensorData(SensorData* sensor) {
@@ -195,6 +220,8 @@ void resetSensorData(SensorData* sensor) {
     sensor->moving_avg_z = 0.0;
     sensor->stable_count = 0;
     sensor->last_recalibration = 0;
+    
+    // איפוס מערכת יציבות מתקדמת
     sensor->stability_index = 0;
     sensor->is_stable = false;
     sensor->current_stability_baseline_x = 0.0;
@@ -205,49 +232,53 @@ void resetSensorData(SensorData* sensor) {
     sensor->in_motion = false;
     sensor->motion_start_time = 0;
     sensor->variance_threshold = STABILITY_VARIANCE_THRESHOLD;
+    sensor->recently_moved = false;
     sensor->last_significant_motion = 0;
     
+    // איפוס מאגר יציבות
     for (int i = 0; i < 10; i++) {
         sensor->stability_buffer[i] = 0.0;
     }
 }
 
 void initMPU6050(TwoWire* wire, const char* name, byte addr) {
-    Serial.print(F("מאתחל "));
+    Serial.print("📡 מאתחל ");
     Serial.print(name);
-    Serial.print(F(" (0x"));
+    Serial.print(" (0x");
     Serial.print(addr, HEX);
-    Serial.print(F(")..."));
+    Serial.print(")...");
     
     wire->beginTransmission(addr);
     byte error = wire->endTransmission();
     
     if (error == 0) {
-        Serial.println(F("זוהה"));
+        Serial.println(" זוהה!");
         
+        // אתחול החיישן
         wire->beginTransmission(addr);
-        wire->write(0x6B);
-        wire->write(0);
+        wire->write(0x6B);  // PWR_MGMT_1 register
+        wire->write(0);     // wake up the sensor
         wire->endTransmission(true);
         delay(100);
         
+        // בדיקת WHO_AM_I
         wire->beginTransmission(addr);
-        wire->write(0x75);
+        wire->write(0x75);  // WHO_AM_I register
         wire->endTransmission(false);
         wire->requestFrom(addr, 1, true);
         
         if (wire->available()) {
             byte whoami = wire->read();
-            Serial.print(F("חיישן "));
+            Serial.print("✓ ");
             Serial.print(name);
-            Serial.print(F(" מחובר (ID: 0x"));
+            Serial.print(" מחובר (ID: 0x");
             Serial.print(whoami, HEX);
-            Serial.println(F(")"));
+            Serial.println(")");
         }
     } else {
-        Serial.print(F("שגיאה "));
+        Serial.print(" ❌ שגיאה ");
         Serial.print(error);
-        Serial.println(F(" - בדוק חיווט"));
+        Serial.println(" - בדוק חיווט!");
     }
 }
 
@@ -272,50 +303,80 @@ void readSensor(TwoWire* wire, SensorData* sensor, byte addr) {
         float ay_g = ay / 16384.0;
         float az_g = az / 16384.0;
         
+        // עדכון מעקב יציבות מתקדם
         updateStabilityTracking(sensor, ax_g, ay_g, az_g);
+        
+        // עדכון baseline רק כשבאמת נדרש
         updateMovingBaseline(sensor, ax_g, ay_g, az_g);
         
-        float diff_x = ax_g - sensor->current_stability_baseline_x;
-        float diff_y = ay_g - sensor->current_stability_baseline_y;
-        float diff_z = az_g - sensor->current_stability_baseline_z;
+        // חישוב ההפרש מהבסיס הנוכחי (יציב)
+        float diff_x, diff_y, diff_z;
+        
+        if (sensor->is_stable) {
+            // אם יציב - השתמש בbaseline הנוכחי היציב
+            diff_x = ax_g - sensor->current_stability_baseline_x;
+            diff_y = ay_g - sensor->current_stability_baseline_y;
+            diff_z = az_g - sensor->current_stability_baseline_z;
+        } else {
+            // אם לא יציב - השתמש בממוצע הנע
+            diff_x = ax_g - sensor->moving_avg_x;
+            diff_y = ay_g - sensor->moving_avg_y;
+            diff_z = az_g - sensor->moving_avg_z;
+        }
         
         float magnitude = sqrt(diff_x*diff_x + diff_y*diff_y + diff_z*diff_z);
         
+        // רק תנועות חזקות מעל הרף נחשבות כמכות
+        // ובתנאי שלא במצב יציב או שיש תנועה משמעותית
         unsigned long current_time = millis();
+        bool significant_motion_recently = (current_time - sensor->last_significant_motion) < SIGNIFICANT_MOTION_COOLDOWN;
         
-        if (magnitude > PUNCH_THRESHOLD) {
+        if (magnitude > PUNCH_THRESHOLD && (!sensor->is_stable || significant_motion_recently)) {
             sensor->current_punch = magnitude;
             sensor->in_motion = true;
             sensor->motion_start_time = current_time;
             sensor->last_significant_motion = current_time;
             
+            // עדכון פיק התאוצה
             if (magnitude > sensor->acceleration_peak) {
                 sensor->acceleration_peak = magnitude;
             }
-        } else if (magnitude < PUNCH_THRESHOLD * 0.3) {
-            sensor->in_motion = false;
+        } else if (sensor->is_stable && !significant_motion_recently) {
+            // במצב יציב ללא תנועה משמעותית - אפס כדי למנוע מכות כוזבות
             sensor->current_punch = 0.0;
-            sensor->acceleration_peak = 0.0;
         } else {
             sensor->current_punch = magnitude;
         }
         
+        // עדכון מקסימום
         if (sensor->current_punch > sensor->max_punch) {
             sensor->max_punch = sensor->current_punch;
+        }
+        
+        // איפוס מצב תנועה אם העוצמה ירדה
+        if (magnitude < PUNCH_THRESHOLD * 0.2) {
+            sensor->in_motion = false;
+            sensor->acceleration_peak = 0.0;
         }
     } else {
         sensor->current_punch = 0.0;
     }
+    
+    delay(1);
 }
 
+// פונקציה חדשה: מעקב יציבות מתקדם
 void updateStabilityTracking(SensorData* sensor, float ax, float ay, float az) {
     unsigned long current_time = millis();
     
+    // חישוב magnitude כולל
     float total_magnitude = sqrt(ax*ax + ay*ay + az*az);
     
+    // הוספה למאגר יציבות
     sensor->stability_buffer[sensor->stability_index] = total_magnitude;
     sensor->stability_index = (sensor->stability_index + 1) % 10;
     
+    // חישוב ממוצע ושונות של המאגר
     float mean = 0;
     for (int i = 0; i < 10; i++) {
         mean += sensor->stability_buffer[i];
@@ -324,36 +385,44 @@ void updateStabilityTracking(SensorData* sensor, float ax, float ay, float az) {
     
     float variance = calculateVariance(sensor->stability_buffer, 10, mean);
     
+    // בדיקת יציבות
     bool currently_stable = (variance < sensor->variance_threshold);
     
     if (currently_stable && !sensor->is_stable) {
+        // התחלת מצב יציבות חדש
         sensor->is_stable = true;
         sensor->stability_start_time = current_time;
         sensor->current_stability_baseline_x = ax;
         sensor->current_stability_baseline_y = ay;
         sensor->current_stability_baseline_z = az;
         
-        Serial.print(F("מיקום יציב חדש: ("));
+        Serial.print("🔒 יציבות זוהתה - baseline חדש: (");
         Serial.print(ax, 2);
-        Serial.print(F(", "));
+        Serial.print(", ");
         Serial.print(ay, 2);
-        Serial.print(F(", "));
+        Serial.print(", ");
         Serial.print(az, 2);
-        Serial.println(F(")"));
+        Serial.println(")");
+        
     } else if (currently_stable && sensor->is_stable) {
+        // המשך מצב יציבות - עדכון עדין של הbaseline
         if ((current_time - sensor->stability_start_time) > MIN_STABILITY_TIME) {
-            const float alpha = 0.005;
+            const float alpha = 0.01; // עדכון איטי מאוד
             sensor->current_stability_baseline_x = sensor->current_stability_baseline_x * (1 - alpha) + ax * alpha;
             sensor->current_stability_baseline_y = sensor->current_stability_baseline_y * (1 - alpha) + ay * alpha;
             sensor->current_stability_baseline_z = sensor->current_stability_baseline_z * (1 - alpha) + az * alpha;
         }
+        
     } else if (!currently_stable && sensor->is_stable) {
+        // יציאה ממצב יציבות
         sensor->is_stable = false;
         sensor->last_significant_motion = current_time;
-        Serial.println(F("תנועה זוהתה"));
+        
+        Serial.println("🔓 יציאה ממצב יציבות - מכות יכולות להיספר");
     }
 }
 
+// פונקציה עזר: חישוב שונות
 float calculateVariance(float* buffer, int size, float mean) {
     float variance = 0;
     for (int i = 0; i < size; i++) {
@@ -362,20 +431,21 @@ float calculateVariance(float* buffer, int size, float mean) {
     return variance / size;
 }
 
+// בדיקה האם החיישן יציב כרגע
 bool isCurrentlyStable(SensorData* sensor) {
     return sensor->is_stable && 
            (millis() - sensor->stability_start_time) > MIN_STABILITY_TIME &&
-           (millis() - sensor->last_significant_motion) > MOTION_COOLDOWN;
+           (millis() - sensor->last_significant_motion) > SIGNIFICANT_MOTION_COOLDOWN;
 }
 
+// עדכון baseline - רק כשבאמת יציב לזמן ארוך
 void updateMovingBaseline(SensorData* sensor, float ax, float ay, float az) {
-    unsigned long current_time = millis();
-    
+    // עדכון רק כשיציב מאוד ולזמן ארוך
     if (isCurrentlyStable(sensor)) {
         sensor->stable_count++;
         
-        if (sensor->stable_count > STABILITY_REQUIRED_SAMPLES && 
-            (current_time - sensor->last_recalibration) > STABLE_POSITION_TIMEOUT) {
+        // כיול מחדש רק אחרי יציבות ארוכה מאוד (30 שניות!)
+        if (sensor->stable_count > 3000) { // 30 שניות ב-100Hz
             sensor->baseline_x = sensor->current_stability_baseline_x;
             sensor->baseline_y = sensor->current_stability_baseline_y;
             sensor->baseline_z = sensor->current_stability_baseline_z;
@@ -384,12 +454,12 @@ void updateMovingBaseline(SensorData* sensor, float ax, float ay, float az) {
             sensor->moving_avg_y = sensor->baseline_y;
             sensor->moving_avg_z = sensor->baseline_z;
             
-            sensor->last_recalibration = current_time;
             sensor->stable_count = 0;
             
-            Serial.println(F("כיול אוטומטי - מיקום חדש"));
+            Serial.println("🔧 כיול אוטומטי - יציבות ארוכה מאוד (30 שניות)");
         }
     } else {
+        // יש תנועה - איפוס ספירה
         sensor->stable_count = 0;
     }
 }
@@ -397,8 +467,9 @@ void updateMovingBaseline(SensorData* sensor, float ax, float ay, float az) {
 void detectPunch(SensorData* sensor) {
     unsigned long current_time = millis();
     
+    // זיהוי מכה מתקדם - רק אם לא במצב יציב או יש תנועה משמעותית
     bool can_detect_punch = !isCurrentlyStable(sensor) || 
-                           (current_time - sensor->last_significant_motion) < MOTION_COOLDOWN;
+                           (current_time - sensor->last_significant_motion) < SIGNIFICANT_MOTION_COOLDOWN;
     
     if (sensor->current_punch > PUNCH_THRESHOLD && 
         !sensor->punch_detected && 
@@ -409,6 +480,7 @@ void detectPunch(SensorData* sensor) {
         sensor->last_detection = current_time;
     }
     
+    // איפוס זיהוי מכה
     if (sensor->current_punch < PUNCH_THRESHOLD * 0.3) {
         sensor->punch_detected = false;
     }
@@ -418,9 +490,11 @@ void detectSmartPunch() {
     static unsigned long last_smart_detection = 0;
     unsigned long current_time = millis();
     
+    // בדיקה שיש זיהוי בחיישן
     bool any_punch = sensor1.punch_detected || sensor2.punch_detected;
     
     if (any_punch && (current_time - last_smart_detection > COOLDOWN_BETWEEN_PUNCHES)) {
+        // איזה חיישן הכי חזק?
         float max_force = 0;
         int winning_sensor = 0;
         String winning_zone = "";
@@ -437,12 +511,15 @@ void detectSmartPunch() {
             winning_zone = "תחתון";
         }
         
+        // אם יש זוכה ברור
         if (winning_sensor > 0) {
+            // בדיקה נוספת: האם המכה לגיטימית?
             SensorData* winning_sensor_data = (winning_sensor == 1) ? &sensor1 : &sensor2;
             bool legitimate_punch = !isCurrentlyStable(winning_sensor_data) ||
-                                   (current_time - winning_sensor_data->last_significant_motion) < MOTION_COOLDOWN;
+                                   (current_time - winning_sensor_data->last_significant_motion) < SIGNIFICANT_MOTION_COOLDOWN;
             
             if (legitimate_punch) {
+                // רק החיישן הזוכה מקבל נקודה
                 if (winning_sensor == 1) {
                     sensor1.punch_count++;
                     sensor1.last_punch_time = current_time;
@@ -451,8 +528,10 @@ void detectSmartPunch() {
                     sensor2.last_punch_time = current_time;
                 }
                 
+                // חישוב עוצמה משולבת
                 float combined_force = calculateCombinedForce(winning_sensor);
                 
+                // חישוב BPM
                 static unsigned long last_punch_time_for_bpm = 0;
                 unsigned long time_between_punches = current_time - last_punch_time_for_bpm;
                 float bpm = 0;
@@ -460,237 +539,89 @@ void detectSmartPunch() {
                     bpm = 60000.0 / time_between_punches;
                 }
                 
+                // למידה אוטומטית
                 if (!learning_complete) {
                     adaptToUser(combined_force);
                 }
                 
                 last_punch_time_for_bpm = current_time;
                 
-                Serial.print(F("מכה "));
+                Serial.print("🥊 מכה ");
                 Serial.print(winning_zone);
-                Serial.print(F(" #"));
+                Serial.print(" #");
                 Serial.print((winning_sensor == 1 ? sensor1.punch_count : sensor2.punch_count));
-                Serial.print(F(" עוצמה: "));
+                Serial.print(" עוצמה: ");
                 Serial.print(max_force, 2);
-                Serial.print(F(" (משולב: "));
+                Serial.print(" (משולב: ");
                 Serial.print(combined_force, 2);
-                Serial.print(F(")"));
+                Serial.print(")");
                 
-                Serial.print(F(" ["));
-                Serial.print(isCurrentlyStable(winning_sensor_data) ? F("יציב") : F("בתנועה"));
-                Serial.print(F("]"));
+                // הוספת מידע על מצב יציבות
+                bool sensor_stable = isCurrentlyStable(winning_sensor_data);
+                Serial.print(" [");
+                Serial.print(sensor_stable ? "יציב" : "בתנועה");
+                Serial.print("]");
                 
                 if (bpm > 0 && bpm < 300) {
-                    Serial.print(F(" BPM: "));
+                    Serial.print(" BPM: ");
                     Serial.print(bpm, 0);
                 }
                 
                 if (!learning_complete) {
-                    Serial.print(F(" [למידה "));
+                    Serial.print(" [למידה ");
                     Serial.print(learning_index);
-                    Serial.print(F("/"));
+                    Serial.print("/");
                     Serial.print(LEARNING_SAMPLE_SIZE);
-                    Serial.print(F("]"));
+                    Serial.print("]");
                 }
                 
-                Serial.print(F(" | סה''כ: "));
+                Serial.print(" | סה''כ: ");
                 Serial.println(sensor1.punch_count + sensor2.punch_count);
                 
+                // שליחה לאפליקציה
                 sendPunchEventToBluetooth(winning_sensor, winning_zone, max_force, combined_force, bpm);
                 
                 last_smart_detection = current_time;
             } else {
-                Serial.println(F("מכה נחסמה - חיישן יציב"));
+                Serial.println("🚫 מכה נחסמה - חיישן במצב יציב");
             }
         }
     }
 }
 
 float calculateCombinedForce(int primary_sensor) {
-    float primary_force = (primary_sensor == 1) ? sensor1.current_punch : sensor2.current_punch;
-    float secondary_boost = (primary_sensor == 1) ? sensor2.current_punch * 0.2 : sensor1.current_punch * 0.2;
+    float primary_force = 0;
+    float secondary_boost = 0;
+    
+    if (primary_sensor == 1) {
+        primary_force = sensor1.current_punch;
+        secondary_boost = sensor2.current_punch * 0.2;
+    } else {
+        primary_force = sensor2.current_punch;
+        secondary_boost = sensor1.current_punch * 0.2;
+    }
+    
     return primary_force + secondary_boost;
 }
 
 void adaptToUser(float force) {
     if (learning_index < LEARNING_SAMPLE_SIZE) {
-        learning_forces[learning_index++] = force;
+        learning_forces[learning_index] = force;
+        learning_index++;
         
         if (learning_index >= LEARNING_SAMPLE_SIZE) {
+            // חישוב ממוצע
             float avg_force = 0;
             for (int i = 0; i < LEARNING_SAMPLE_SIZE; i++) {
                 avg_force += learning_forces[i];
             }
             avg_force /= LEARNING_SAMPLE_SIZE;
             
+            // קביעת רף חדש
             PUNCH_THRESHOLD = avg_force * 0.7;
-            if (PUNCH_THRESHOLD < 0.5) PUNCH_THRESHOLD = 0.5;
-            if (PUNCH_THRESHOLD > 2.0) PUNCH_THRESHOLD = 2.0;
+            if (PUNCH_THRESHOLD < 0.3) PUNCH_THRESHOLD = 0.3;
+            if (PUNCH_THRESHOLD > 1.5) PUNCH_THRESHOLD = 1.5;
             
             learning_complete = true;
             
-            Serial.println(F("למידה הושלמה"));
-            Serial.print(F("רף חדש: "));
-            Serial.println(PUNCH_THRESHOLD, 2);
-        }
-    }
-}
-
-void calibrateSensor(TwoWire* wire, SensorData* sensor, const char* name, byte addr) {
-    Serial.print(F("מכייל "));
-    Serial.print(name);
-    Serial.print(F("..."));
-    
-    float ax_sum = 0, ay_sum = 0, az_sum = 0;
-    int valid_readings = 0;
-    const int CALIBRATION_SAMPLES = 50;
-    
-    for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
-        wire->beginTransmission(addr);
-        wire->write(0x3B);
-        if (wire->endTransmission(false) == 0) {
-            wire->requestFrom(addr, 6, true);
-            if (wire->available() >= 6) {
-                int16_t ax = (wire->read() << 8) | wire->read();
-                int16_t ay = (wire->read() << 8) | wire->read();
-                int16_t az = (wire->read() << 8) | wire->read();
-                
-                ax_sum += ax / 16384.0;
-                ay_sum += ay / 16384.0;
-                az_sum += az / 16384.0;
-                valid_readings++;
-            }
-        }
-        delay(10);
-    }
-    
-    if (valid_readings > 0) {
-        sensor->baseline_x = ax_sum / valid_readings;
-        sensor->baseline_y = ay_sum / valid_readings;
-        sensor->baseline_z = az_sum / valid_readings;
-        
-        sensor->moving_avg_x = sensor->baseline_x;
-        sensor->moving_avg_y = sensor->baseline_y;
-        sensor->moving_avg_z = sensor->baseline_z;
-        
-        sensor->current_stability_baseline_x = sensor->baseline_x;
-        sensor->current_stability_baseline_y = sensor->baseline_y;
-        sensor->current_stability_baseline_z = sensor->baseline_z;
-        
-        Serial.print(F("הושלם: ("));
-        Serial.print(sensor->baseline_x, 2);
-        Serial.print(F(", "));
-        Serial.print(sensor->baseline_y, 2);
-        Serial.print(F(", "));
-        Serial.print(sensor->baseline_z, 2);
-        Serial.println(F(")"));
-    } else {
-        Serial.println(F("שגיאה בכיול"));
-    }
-}
-
-void sendDataToBluetooth() {
-    if (millis() - last_data_send < DATA_SEND_INTERVAL) return;
-    
-    StaticJsonDocument<128> doc; // מוקטן מ-200
-    doc["session_id"] = session_id;
-    doc["upper_punch"] = roundFloat(sensor1.current_punch, 2);
-    doc["lower_punch"] = roundFloat(sensor2.current_punch, 2);
-    doc["total_punches"] = total_punches;
-    doc["uptime"] = millis() / 1000;
-    
-    String json;
-    serializeJson(doc, json);
-    SerialBT.println(json);
-    
-    last_data_send = millis();
-}
-
-void sendStatusToBluetooth() {
-    if (millis() - last_status_send < DATA_STATUS_INTERVAL) return;
-    
-    StaticJsonDocument<128> doc;
-    doc["status"] = "running";
-    doc["upper_count"] = sensor1.punch_count;
-    doc["lower_count"] = sensor2.punch_count;
-    doc["total_punches"] = total_punches;
-    doc["threshold"] = roundFloat(PUNCH_THRESHOLD, 2);
-    
-    String json;
-    serializeJson(doc, json);
-    SerialBT.println(json);
-    
-    last_status_send = millis();
-}
-
-void sendPunchEventToBluetooth(int sensor_num, String zone, float force, float combined_force, float bpm) {
-    StaticJsonDocument<128> doc;
-    doc["event"] = "punch";
-    doc["sensor"] = sensor_num;
-    doc["zone"] = zone;
-    doc["force"] = roundFloat(force, 2);
-    doc["combined_force"] = roundFloat(combined_force, 2);
-    doc["timestamp"] = millis();
-    if (bpm > 0 && bpm < 300) {
-        doc["bpm"] = roundFloat(bpm, 0);
-    }
-    
-    String json;
-    serializeJson(doc, json);
-    SerialBT.println(json);
-}
-
-void handleBluetoothCommands() {
-    if (SerialBT.available()) {
-        String command = SerialBT.readStringUntil('\n');
-        command.trim();
-        
-        if (command == "RESET") {
-            resetTraining();
-        } else if (command == "CALIBRATE") {
-            calibrateAllSensors();
-        }
-    }
-}
-
-void resetTraining() {
-    resetSensorData(&sensor1);
-    resetSensorData(&sensor2);
-    total_punches = 0;
-    training_start_time = millis();
-    session_id = "session_" + String(millis());
-    learning_index = 0;
-    learning_complete = false;
-    Serial.println(F("אימון אופס"));
-}
-
-void calibrateAllSensors() {
-    Serial.println(F("מכייל מחדש חיישנים..."));
-    calibrateSensor(&I2C_1, &sensor1, "עליון", MPU6050_ADDR1);
-    calibrateSensor(&I2C_2, &sensor2, "תחתון", MPU6050_ADDR2);
-    Serial.println(F("כיול הושלם"));
-}
-
-void printStatus() {
-    Serial.println(F("סטטוס מערכת:"));
-    Serial.print(F("חיישן עליון: "));
-    Serial.print(sensor1.punch_count);
-    Serial.print(F(" מכות, עוצמה: "));
-    Serial.println(sensor1.current_punch, 2);
-    
-    Serial.print(F("חיישן תחתון: "));
-    Serial.print(sensor2.punch_count);
-    Serial.print(F(" מכות, עוצמה: "));
-    Serial.println(sensor2.current_punch, 2);
-    
-    Serial.print(F("סה\"כ מכות: "));
-    Serial.println(total_punches);
-    
-    Serial.print(F("רף זיהוי: "));
-    Serial.println(PUNCH_THRESHOLD, 2);
-}
-
-float roundFloat(float value, int decimals) {
-    float multiplier = pow(10.0, decimals);
-    return round(value * multiplier) / multiplier;
-}
+            Serial.println("\n✅ למידה הושלמה!");
